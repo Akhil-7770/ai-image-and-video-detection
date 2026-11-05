@@ -1,15 +1,18 @@
 import streamlit as st
 from PIL import Image, ImageChops, ImageEnhance
+import io
 import tempfile
 import os
 from backend import predict_image, predict_video
 
 # --- ELA Logic ---
-def convert_to_ela_image(path, quality):
-    original_image = Image.open(path).convert('RGB')
-    resaved_name = 'temp_ela.jpg'
-    original_image.save(resaved_name, 'JPEG', quality=quality)
-    resaved_image = Image.open(resaved_name)
+def convert_to_ela_image(image, quality):
+    # Re-save as JPEG in memory and compare with the original: edited regions recompress differently
+    original_image = image.convert('RGB')
+    buffer = io.BytesIO()
+    original_image.save(buffer, 'JPEG', quality=quality)
+    buffer.seek(0)
+    resaved_image = Image.open(buffer)
     ela_image = ImageChops.difference(original_image, resaved_image)
     extrema = ela_image.getextrema()
     max_diff = max([ex[1] for ex in extrema])
@@ -71,9 +74,7 @@ with tab1:
         with col2:
             st.subheader("Technical Artifacts (ELA)")
             st.caption("Brighter areas indicate potential manipulation or high error levels.")
-            with open("temp_upload.jpg", "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            ela = convert_to_ela_image("temp_upload.jpg", 90)
+            ela = convert_to_ela_image(image, 90)
             st.image(ela, use_container_width=True)
 
 # --- TAB 2: VIDEO ---
@@ -82,13 +83,14 @@ with tab2:
     uploaded_video = st.file_uploader("Upload Suspect Video", type=["mp4", "mov"])
     
     if uploaded_video is not None:
-        # Save temp file
-        tfile = tempfile.NamedTemporaryFile(delete=False) 
-        tfile.write(uploaded_video.read())
-        
+        # Save to a temp file (closed before reading, so OpenCV sees the whole video)
+        suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tfile:
+            tfile.write(uploaded_video.getbuffer())
+
         # --- LEARNING ASPECT: Check File Size/Compression ---
         file_size_mb = os.path.getsize(tfile.name) / (1024 * 1024)
-        st.video(tfile.name)
+        st.video(uploaded_video)
         
         st.markdown(f"**File Analysis:** `{file_size_mb:.2f} MB`")
         
@@ -98,12 +100,15 @@ with tab2:
         if st.button('🎥 Scan Video Frames'):
             with st.spinner('Extracting and analyzing keyframes...'):
                 result = predict_video(tfile.name)
-                
+                os.remove(tfile.name)
+
                 label = result['label']
                 score = result['score'] * 100
                 
                 st.markdown("---")
-                if label == 'artificial':
+                if label == 'Error':
+                    st.error("Could not read any frames from this video. Try another file or format.")
+                elif label == 'artificial':
                     st.error(f"## 🚨 DEEPFAKE DETECTED")
                     st.metric("Fake Frame Ratio", f"{score:.1f}%")
                 else:
